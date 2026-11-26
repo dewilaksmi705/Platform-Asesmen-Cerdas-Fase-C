@@ -135,21 +135,19 @@ async function startServer() {
         return;
       }
 
-      const providerId =
-        typeof body.providerId === 'string' ? body.providerId.trim() : '';
+      // Hanya Google Gemini yang didukung; providerId dari klien diabaikan.
       const apiKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
 
-      if (!providerId || !apiKey || apiKey.length < 8) {
+      if (!apiKey || apiKey.length < 8) {
         res.status(400).json({
           error:
-            'Penyedia AI dan API Key pribadi guru (BYOK) wajib diisi sebelum membuat soal.',
+            'API Key Gemini pribadi guru (BYOK) wajib diisi sebelum membuat soal.',
         });
         return;
       }
 
       const { questions, providerName } = await generateQuestionsViaAi({
         draft: validDraft,
-        providerId,
         apiKey,
       });
 
