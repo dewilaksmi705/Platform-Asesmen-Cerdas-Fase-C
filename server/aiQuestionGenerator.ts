@@ -309,7 +309,64 @@ function normalizeAndValidateQuestions(
   });
 }
 
+// Urutan model Gemini yang dicoba. Jika satu model sedang penuh (503/429),
+// aplikasi otomatis mencoba model berikutnya.
+const GEMINI_MODEL_FALLBACKS = [
+  'gemini-3.7-flash',
+  'gemini-3.5-flash',
+  'gemini-4-hydrogen',
+];
+
+function isTemporaryGeminiError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /\b(503|429|500)\b|UNAVAILABLE|RESOURCE_EXHAUSTED|high demand|overloaded|INTERNAL/i.test(
+    msg
+  );
+}
+
+function isModelNotFoundError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /\b404\b|NOT_FOUND|not found|is not supported/i.test(msg);
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 async function generateWithGemini(
+  apiKey: string,
+  systemInstruction: string,
+  userPrompt: string
+): Promise<{ text: string; model: string }> {
+  let lastError: unknown = null;
+  for (const model of GEMINI_MODEL_FALLBACKS) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const text = await generateWithGeminiModel(
+          model,
+          apiKey,
+          systemInstruction,
+          userPrompt
+        );
+        return { text, model };
+      } catch (err) {
+        lastError = err;
+        console.warn(
+          `[Gemini] Model ${model} gagal (percobaan ${attempt + 1}):`,
+          err instanceof Error ? err.message.slice(0, 200) : err
+        );
+        if (isModelNotFoundError(err)) break; // coba model berikutnya
+        if (!isTemporaryGeminiError(err)) throw err; // misal API key salah
+        if (attempt === 0) await sleep(2000);
+      }
+    }
+  }
+  throw new Error(
+    'Semua model Google Gemini sedang sibuk. Silakan coba lagi beberapa menit lagi, atau kurangi jumlah soal. ' +
+      (lastError instanceof Error ? `Detail: ${lastError.message.slice(0, 160)}` : '')
+  );
+}
+
+async function generateWithGeminiModel(
+  model: string,
   apiKey: string,
   systemInstruction: string,
   userPrompt: string
@@ -324,7 +381,7 @@ async function generateWithGemini(
   });
 
   const response = await ai.models.generateContent({
-    model: 'gemini-4-hydrogen',
+    model,
     contents: userPrompt,
     config: {
       systemInstruction,
@@ -485,12 +542,13 @@ export async function generateQuestionsViaAi(params: {
   let providerName: string;
 
   if (params.providerId === 'gemini') {
-    providerName = 'Google Gemini (gemini-4-hydrogen)';
-    rawOutput = await generateWithGemini(
+    const gemini = await generateWithGemini(
       trimmedKey,
       systemInstruction,
       userPrompt
     );
+    providerName = `Google Gemini (${gemini.model})`;
+    rawOutput = gemini.text;
   } else if (params.providerId === 'openai') {
     providerName = 'OpenAI GPT (gpt-4o-mini)';
     rawOutput = await generateWithOpenAi(
