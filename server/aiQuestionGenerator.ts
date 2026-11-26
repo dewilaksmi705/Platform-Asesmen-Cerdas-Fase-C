@@ -309,36 +309,194 @@ function normalizeAndValidateQuestions(
   });
 }
 
-// Urutan model Gemini yang dicoba. Jika satu model sedang penuh (503/429),
-// aplikasi otomatis mencoba model berikutnya.
-const GEMINI_MODEL_FALLBACKS = [
+// ============================================================================
+// PEMILIHAN MODEL GEMINI OTOMATIS
+// ----------------------------------------------------------------------------
+// Nama model Gemini sering berubah (gemini-2.5-flash, gemini-3.7-flash,
+// gemini-4-..., dst). Karena itu aplikasi TIDAK menuliskan nama model secara
+// tetap. Setiap kali soal dibuat, server:
+//   1. Meminta daftar model yang tersedia untuk API Key guru langsung ke Google.
+//   2. Menyaring model teks yang bisa membuat konten (bukan model gambar,
+//      suara, video, embedding, dsb).
+//   3. Mengurutkan: versi stabil dulu, keluarga "flash" (cepat & kuota gratis
+//      besar) dulu, lalu versi terbaru dulu.
+//   4. Mencoba model satu per satu. Bila satu model sibuk (503), kuotanya habis
+//      (429), atau tidak tersedia (404), otomatis pindah ke model berikutnya.
+// Daftar cadangan di bawah hanya dipakai bila Google gagal mengirim daftar model.
+// ============================================================================
+
+const GEMINI_STATIC_FALLBACKS = [
+  'gemini-flash-latest',
   'gemini-3.7-flash',
   'gemini-3.5-flash',
-  'gemini-4-hydrogen',
+  'gemini-2.5-flash',
+  'gemini-flash-lite-latest',
+  'gemini-pro-latest',
 ];
 
-function isTemporaryGeminiError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  return /\b(503|429|500)\b|UNAVAILABLE|RESOURCE_EXHAUSTED|high demand|overloaded|INTERNAL/i.test(
+/** Model yang bukan untuk menulis teks/JSON biasa. */
+const NON_TEXT_MODEL_PATTERN =
+  /(tts|image|imagen|live|audio|speech|embed|transcribe|translate|omni|video|veo|robotics|computer-use|aqa|vision|banana|learnlm|gemma)/i;
+
+/** Maksimal jumlah model yang dicoba dalam satu kali pembuatan soal. */
+const MAX_MODELS_TO_TRY = 6;
+const MODEL_LIST_CACHE_MS = 30 * 60 * 1000;
+
+const modelListCache = new Map<string, { models: string[]; at: number }>();
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function hashKey(apiKey: string): string {
+  return crypto.createHash('sha256').update(apiKey).digest('hex');
+}
+
+function createGeminiClient(apiKey: string): GoogleGenAI {
+  return new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      },
+    },
+  });
+}
+
+function parseGeminiVersion(name: string): number {
+  const m = name.match(/gemini-(\d+(?:\.\d+)?)/i);
+  return m ? parseFloat(m[1]) : 0;
+}
+
+/** Semakin besar semakin diutamakan. */
+function geminiTierScore(name: string): number {
+  const n = name.toLowerCase();
+  if (/flash-lite/.test(n)) return 2;
+  if (/flash/.test(n)) return 4;
+  if (/pro/.test(n)) return 1; // kuota gratis Pro sangat kecil
+  return 3; // nama kode baru (mis. gemini-4-xxx)
+}
+
+function isPreviewModel(name: string): boolean {
+  return /(preview|exp|experimental|\d{2}-\d{2,4}$)/i.test(name);
+}
+
+export function rankGeminiModels(names: string[]): string[] {
+  const unique = Array.from(
+    new Set(names.map((n) => n.replace(/^models\//, '').trim()).filter(Boolean))
+  );
+  return unique
+    .filter((n) => /^gemini/i.test(n) && !NON_TEXT_MODEL_PATTERN.test(n))
+    .sort((a, b) => {
+      const stableDiff = Number(isPreviewModel(a)) - Number(isPreviewModel(b));
+      if (stableDiff !== 0) return stableDiff;
+      const tierDiff = geminiTierScore(b) - geminiTierScore(a);
+      if (tierDiff !== 0) return tierDiff;
+      const verDiff = parseGeminiVersion(b) - parseGeminiVersion(a);
+      if (verDiff !== 0) return verDiff;
+      // Alias "-latest" diletakkan setelah versi bernomor yang setara.
+      return a.length - b.length;
+    });
+}
+
+async function discoverGeminiModels(apiKey: string): Promise<string[]> {
+  const cacheKey = hashKey(apiKey);
+  const cached = modelListCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < MODEL_LIST_CACHE_MS) {
+    return cached.models;
+  }
+
+  try {
+    const ai = createGeminiClient(apiKey);
+    const found: string[] = [];
+    const pager = await ai.models.list({ config: { pageSize: 100 } });
+    for await (const model of pager) {
+      const actions = model.supportedActions ?? [];
+      if (actions.length && !actions.includes('generateContent')) continue;
+      if (model.name) found.push(model.name);
+    }
+    const ranked = rankGeminiModels(found);
+    if (ranked.length) {
+      modelListCache.set(cacheKey, { models: ranked, at: Date.now() });
+      console.log(`[Gemini] Model tersedia (urutan dicoba): ${ranked.join(', ')}`);
+      return ranked;
+    }
+  } catch (err) {
+    if (isInvalidKeyError(err)) throw friendlyInvalidKeyError();
+    console.warn(
+      '[Gemini] Gagal mengambil daftar model, memakai daftar cadangan:',
+      err instanceof Error ? err.message.slice(0, 200) : err
+    );
+  }
+  return GEMINI_STATIC_FALLBACKS;
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function errorStatus(err: unknown): number | undefined {
+  const s = (err as { status?: unknown })?.status;
+  if (typeof s === 'number') return s;
+  const m = errorText(err).match(/"code"\s*:\s*(\d{3})/);
+  return m ? Number(m[1]) : undefined;
+}
+
+function isInvalidKeyError(err: unknown): boolean {
+  const msg = errorText(err);
+  const status = errorStatus(err);
+  return (
+    /API_KEY_INVALID|API key not valid|PERMISSION_DENIED|UNAUTHENTICATED/i.test(msg) ||
+    status === 401 ||
+    status === 403
+  );
+}
+
+function friendlyInvalidKeyError(): Error {
+  return new Error(
+    'API Key Gemini tidak valid atau tidak memiliki izin. Periksa kembali API Key dari Google AI Studio (aistudio.google.com/app/apikey).'
+  );
+}
+
+/** Kesalahan yang bisa diatasi dengan mencoba model lain. */
+function shouldTryNextModel(err: unknown): boolean {
+  const msg = errorText(err);
+  const status = errorStatus(err);
+  if (status && [404, 429, 500, 502, 503, 504].includes(status)) return true;
+  return /UNAVAILABLE|RESOURCE_EXHAUSTED|NOT_FOUND|not found|is not supported|high demand|overloaded|INTERNAL|quota|deadline|timed? ?out|fetch failed/i.test(
     msg
   );
 }
 
-function isModelNotFoundError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  return /\b404\b|NOT_FOUND|not found|is not supported/i.test(msg);
+function isBusyError(err: unknown): boolean {
+  const status = errorStatus(err);
+  return status === 503 || /UNAVAILABLE|high demand|overloaded/i.test(errorText(err));
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+function shortGeminiReason(err: unknown): string {
+  const status = errorStatus(err);
+  const msg = errorText(err);
+  const code = msg.match(/"status"\s*:\s*"([A-Z_]+)"/)?.[1];
+  if (status === 404 || /NOT_FOUND/.test(msg)) return 'tidak tersedia';
+  if (status === 429 || /RESOURCE_EXHAUSTED/.test(msg)) return 'kuota habis';
+  if (status === 503 || /UNAVAILABLE/.test(msg)) return 'sedang sibuk';
+  return [status, code].filter(Boolean).join(' ') || msg.slice(0, 60);
+}
 
 async function generateWithGemini(
   apiKey: string,
   systemInstruction: string,
   userPrompt: string
 ): Promise<{ text: string; model: string }> {
-  let lastError: unknown = null;
-  for (const model of GEMINI_MODEL_FALLBACKS) {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+  const candidates = (await discoverGeminiModels(apiKey)).slice(
+    0,
+    MAX_MODELS_TO_TRY
+  );
+  const report: string[] = [];
+
+  for (let i = 0; i < candidates.length; i += 1) {
+    const model = candidates[i];
+    // Model pertama diberi satu kali kesempatan ulang bila sedang sibuk.
+    const attempts = i === 0 ? 2 : 1;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
         const text = await generateWithGeminiModel(
           model,
@@ -346,22 +504,30 @@ async function generateWithGemini(
           systemInstruction,
           userPrompt
         );
+        console.log(`[Gemini] Soal berhasil dibuat dengan model ${model}`);
         return { text, model };
       } catch (err) {
-        lastError = err;
         console.warn(
           `[Gemini] Model ${model} gagal (percobaan ${attempt + 1}):`,
-          err instanceof Error ? err.message.slice(0, 200) : err
+          errorText(err).slice(0, 200)
         );
-        if (isModelNotFoundError(err)) break; // coba model berikutnya
-        if (!isTemporaryGeminiError(err)) throw err; // misal API key salah
-        if (attempt === 0) await sleep(2000);
+        if (isInvalidKeyError(err)) throw friendlyInvalidKeyError();
+        if (!shouldTryNextModel(err)) throw err;
+        if (attempt + 1 < attempts && isBusyError(err)) {
+          await sleep(3000);
+          continue;
+        }
+        report.push(`${model}: ${shortGeminiReason(err)}`);
+        break;
       }
     }
+    // Jika model gagal karena hilang dari daftar, segarkan daftar berikutnya.
+    modelListCache.delete(hashKey(apiKey));
   }
+
   throw new Error(
-    'Semua model Google Gemini sedang sibuk. Silakan coba lagi beberapa menit lagi, atau kurangi jumlah soal. ' +
-      (lastError instanceof Error ? `Detail: ${lastError.message.slice(0, 160)}` : '')
+    'Semua model Google Gemini yang tersedia sedang tidak bisa dipakai. Silakan coba lagi beberapa menit lagi atau kurangi jumlah soal. Rincian: ' +
+      report.join('; ')
   );
 }
 
@@ -371,14 +537,7 @@ async function generateWithGeminiModel(
   systemInstruction: string,
   userPrompt: string
 ): Promise<string> {
-  const ai = new GoogleGenAI({
-    apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
-  });
+  const ai = createGeminiClient(apiKey);
 
   const response = await ai.models.generateContent({
     model,
@@ -450,84 +609,10 @@ async function generateWithGeminiModel(
   return text;
 }
 
-async function generateWithOpenAi(
-  apiKey: string,
-  systemInstruction: string,
-  userPrompt: string
-): Promise<string> {
-  const res = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: 'gpt-4o-mini',
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: systemInstruction },
-        { role: 'user', content: userPrompt },
-      ],
-    }),
-  });
-
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    throw new Error(
-      `Permintaan ke OpenAI gagal (HTTP ${res.status}). Periksa kembali API Key dan kuota Anda.${errText ? ` Detail: ${errText.slice(0, 180)}` : ''}`
-    );
-  }
-
-  const data = (await res.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-  };
-  const content = data.choices?.[0]?.message?.content;
-  if (!content) {
-    throw new Error('OpenAI tidak mengembalikan isi soal.');
-  }
-  return content;
-}
-
-async function generateWithAnthropic(
-  apiKey: string,
-  systemInstruction: string,
-  userPrompt: string
-): Promise<string> {
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model: 'claude-3-5-sonnet-latest',
-      max_tokens: 8192,
-      system: systemInstruction,
-      messages: [{ role: 'user', content: userPrompt }],
-    }),
-  });
-
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    throw new Error(
-      `Permintaan ke Anthropic Claude gagal (HTTP ${res.status}). Periksa kembali API Key dan kuota Anda.${errText ? ` Detail: ${errText.slice(0, 180)}` : ''}`
-    );
-  }
-
-  const data = (await res.json()) as {
-    content?: Array<{ type?: string; text?: string }>;
-  };
-  const textBlock = data.content?.find((c) => c.type === 'text')?.text;
-  if (!textBlock) {
-    throw new Error('Anthropic Claude tidak mengembalikan isi soal.');
-  }
-  return textBlock;
-}
 
 export async function generateQuestionsViaAi(params: {
   draft: AssessmentDraft;
-  providerId: string;
+  providerId?: string;
   apiKey: string;
 }): Promise<{ questions: TeacherQuestion[]; providerName: string }> {
   const slots = buildBlueprintSlots(params.draft);
@@ -535,43 +620,21 @@ export async function generateQuestionsViaAi(params: {
 
   const trimmedKey = params.apiKey.trim();
   if (!trimmedKey || trimmedKey.length < 8) {
-    throw new Error('API Key pribadi guru (BYOK) wajib diisi dengan benar.');
+    throw new Error('API Key Gemini pribadi guru (BYOK) wajib diisi dengan benar.');
   }
 
-  let rawOutput: string;
-  let providerName: string;
+  // Aplikasi hanya mendukung Google Gemini (memiliki kuota gratis).
+  const gemini = await generateWithGemini(
+    trimmedKey,
+    systemInstruction,
+    userPrompt
+  );
 
-  if (params.providerId === 'gemini') {
-    const gemini = await generateWithGemini(
-      trimmedKey,
-      systemInstruction,
-      userPrompt
-    );
-    providerName = `Google Gemini (${gemini.model})`;
-    rawOutput = gemini.text;
-  } else if (params.providerId === 'openai') {
-    providerName = 'OpenAI GPT (gpt-4o-mini)';
-    rawOutput = await generateWithOpenAi(
-      trimmedKey,
-      systemInstruction,
-      userPrompt
-    );
-  } else if (params.providerId === 'anthropic') {
-    providerName = 'Anthropic Claude';
-    rawOutput = await generateWithAnthropic(
-      trimmedKey,
-      systemInstruction,
-      userPrompt
-    );
-  } else {
-    throw new Error('Penyedia AI yang dipilih tidak dikenali.');
-  }
-
-  const parsed = extractJsonObject(rawOutput);
+  const parsed = extractJsonObject(gemini.text);
   const questions = normalizeAndValidateQuestions(
     parsed.questions ?? [],
     slots
   );
 
-  return { questions, providerName };
+  return { questions, providerName: `Google Gemini (${gemini.model})` };
 }

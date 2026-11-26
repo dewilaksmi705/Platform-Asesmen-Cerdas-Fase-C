@@ -649,24 +649,8 @@ export const AI_PROVIDER_OPTIONS: AiProviderOption[] = [
     id: 'gemini',
     nama: 'Google Gemini',
     penyedia: 'Google AI',
-    modelRencana: 'Gemini Flash / Pro (Rencana Integrasi)',
+    modelRencana: 'Model Gemini terbaik dipilih otomatis',
     deskripsi:
-      'Cocok untuk penyusunan soal Bahasa Indonesia yang kontekstual, cepat, dan terstruktur sesuai taksonomi Bloom.',
-  },
-  {
-    id: 'openai',
-    nama: 'OpenAI GPT',
-    penyedia: 'OpenAI',
-    modelRencana: 'GPT-4o Mini / GPT-4o (Rencana Integrasi)',
-    deskripsi:
-      'Mendukung pembuatan variasi soal pilihan ganda berbasis stimulus cerita maupun numerasi SD Fase C.',
-  },
-  {
-    id: 'anthropic',
-    nama: 'Anthropic Claude',
-    penyedia: 'Anthropic',
-    modelRencana: 'Claude Sonnet / Haiku (Rencana Integrasi)',
-    deskripsi:
-      'Dirancang untuk menghasilkan redaksi soal yang runtut, ramah anak, dan mematuhi pedoman penulisan soal.',
+      'Gratis dengan API Key dari Google AI Studio. Aplikasi otomatis memilih model Gemini terbaru yang tersedia, dan berpindah ke model lain bila satu model sedang sibuk.',
   },
 ];

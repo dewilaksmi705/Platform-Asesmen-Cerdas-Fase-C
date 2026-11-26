@@ -41,18 +41,6 @@ const PROVIDER_API_KEY_LINKS: Record<string, ProviderApiKeyLinkMeta> = {
     shortNote:
       'Masuk dengan akun Google di Google AI Studio, pilih menu API Keys, lalu klik Create API Key.',
   },
-  openai: {
-    buttonLabel: 'Dapatkan API Key OpenAI',
-    url: 'https://platform.openai.com/api-keys',
-    shortNote:
-      'Masuk ke OpenAI Platform, buka menu API Keys, lalu pilih Create new secret key.',
-  },
-  anthropic: {
-    buttonLabel: 'Dapatkan API Key Claude',
-    url: 'https://platform.claude.com/settings/keys',
-    shortNote:
-      'Masuk ke Console Anthropic Claude, buka menu Settings > API Keys, lalu pilih Create Key.',
-  },
 };
 
 const QUICK_API_KEY_STEPS = [
@@ -263,14 +251,14 @@ export function KonfigurasiAiPage({
                   1. Pilih Penyedia Layanan AI
                 </h2>
                 <p className="text-xs sm:text-sm text-slate-600 mt-0.5">
-                  Tentukan penyedia AI yang sesuai dengan API Key pribadi yang
-                  Anda miliki.
+                  Soal disusun dengan Google Gemini menggunakan API Key pribadi
+                  Anda. Model terbaik dipilih otomatis.
                 </p>
               </div>
             </div>
 
             <div
-              className="grid grid-cols-1 md:grid-cols-3 gap-3"
+              className="grid grid-cols-1 gap-3"
               role="radiogroup"
               aria-label="Pilih penyedia AI"
             >
@@ -758,7 +746,7 @@ export function KonfigurasiAiPage({
                 </h3>
                 <p>
                   API Key adalah kunci akses pribadi dari penyedia layanan AI
-                  (Google Gemini, OpenAI GPT, atau Anthropic Claude) yang
+                  (Google Gemini) yang
                   menghubungkan ASESMEN CERDAS dengan mesin AI secara langsung
                   atas nama akun guru. Dengan sistem{' '}
                   <strong className="text-navy-900">BYOK</strong>, Anda memiliki
