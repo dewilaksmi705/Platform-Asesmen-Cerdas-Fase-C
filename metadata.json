@@ -1,0 +1,6 @@
+{
+  "name": "ASESMEN CERDAS",
+  "description": "Platform pembuatan dan pelaksanaan asesmen sumatif berbantuan AI untuk Sekolah Dasar Fase C (Kelas 5 dan Kelas 6). Asesmen Lebih Cerdas, Pembelajaran Lebih Bermakna.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
